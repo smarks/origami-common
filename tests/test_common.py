@@ -46,6 +46,82 @@ def test_rate_limit_allows_under_limit_then_blocks():
     assert calls["count"] == 2  # third call never reached the view
 
 
+class _FakeClock:
+    def __init__(self) -> None:
+        self.now = 1000.0
+
+    def advance(self, seconds: float) -> None:
+        self.now += seconds
+
+
+class _TtlCache:
+    """A minimal cache that honours per-key TTL against a controllable clock,
+    with incr() preserving the existing expiry the way real backends do -- enough
+    to tell a fixed window (TTL set once) from a rolling one (TTL refreshed)."""
+
+    def __init__(self, clock: _FakeClock) -> None:
+        self._clock = clock
+        self._store: dict[str, tuple[int, float]] = {}
+
+    def _live_value(self, key):
+        item = self._store.get(key)
+        if item is None:
+            return None
+        value, expires_at = item
+        if self._clock.now >= expires_at:
+            del self._store[key]
+            return None
+        return value
+
+    def get(self, key, default=None):
+        value = self._live_value(key)
+        return default if value is None else value
+
+    def set(self, key, value, timeout):
+        self._store[key] = (value, self._clock.now + timeout)
+
+    def add(self, key, value, timeout) -> bool:
+        if self._live_value(key) is None:
+            self._store[key] = (value, self._clock.now + timeout)
+            return True
+        return False
+
+    def incr(self, key, delta: int = 1) -> int:
+        value = self._live_value(key)
+        if value is None:
+            raise ValueError(f"'{key}' is not present or has expired")
+        _old, expires_at = self._store[key]   # incr must NOT push the TTL forward
+        self._store[key] = (value + delta, expires_at)
+        return value + delta
+
+
+def test_rate_limit_is_a_fixed_window_that_resets_not_a_rolling_one(monkeypatch):
+    # #311: steady sub-limit traffic must not be throttled. With a rolling window
+    # (TTL refreshed each request) the counter never expires while requests keep
+    # coming, so it climbs to the cap and over-throttles. A fixed window anchored
+    # on the first request expires on schedule and lets the count reset.
+    clock = _FakeClock()
+    fake_cache = _TtlCache(clock)
+    import origami_common.decorators as decorators
+
+    monkeypatch.setattr(decorators, "cache", fake_cache)
+
+    @decorators.rate_limit("fixed", max_requests=3, window_seconds=10)
+    def view(request):
+        return JsonResponse({"ok": True})
+
+    request = _anon_request()
+    assert view(request).status_code == 200   # t=0,  count 1
+    clock.advance(4)
+    assert view(request).status_code == 200   # t=4,  count 2
+    clock.advance(4)
+    assert view(request).status_code == 200   # t=8,  count 3 (at the cap)
+    clock.advance(3)
+    # t=11: the window opened at t=0 has elapsed. A fixed window resets, so this is
+    # allowed; a rolling window would still hold count 3 and wrongly return 429.
+    assert view(request).status_code == 200
+
+
 def test_json_error_and_permission_denied():
     err = _json_error("nope", status=418)
     assert err.status_code == 418

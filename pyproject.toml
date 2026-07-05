@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "origami-common"
-version = "0.1.0"
+version = "0.2.1"
 description = "Domain-agnostic Django web utilities (rate limiting, audit logging, JSON helpers, view mixins) shared across Tarmar projects."
 requires-python = ">=3.11"
 dependencies = ["Django>=4.2"]
