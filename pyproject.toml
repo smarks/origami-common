@@ -18,3 +18,6 @@ include = ["origami_common*"]
 [tool.pytest.ini_options]
 DJANGO_SETTINGS_MODULE = "tests.settings"
 addopts = "-p no:cacheprovider"
+# Put the repo root on sys.path so `tests.settings` resolves under the bare
+# `pytest` console script in CI (not only `python -m pytest`, which adds cwd).
+pythonpath = ["."]
